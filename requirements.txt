@@ -3,4 +3,4 @@ pandas
 requests
 matplotlib
 pytz
-plot
+plotly
