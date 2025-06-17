@@ -1,210 +1,176 @@
+
 import streamlit as st
-from datetime import datetime, timedelta
+from datetime import datetime
 import pandas as pd
 import requests
-import matplotlib.pyplot as plt
+from carbon import CarbonIntensity
+from price_prediction import PriceForecaster
+from price_calculator import PriceCalculator
 import pytz
 import plotly.express as px
+import plotly.graph_objects as go
 
-# Set Streamlit page config FIRST
 st.set_page_config(layout="wide", page_title="Smart EV Charging Scheduler")
 
-# --- Region Selection ---
-REGION_CODES = {
-    "East Midlands": "E",
-    "Eastern England": "F",
-    "London": "A",
-    "Merseyside and North Wales": "D",
-    "Midlands": "M",
-    "North East England": "C",
-    "North Scotland": "P",
-    "North West England": "B",
-    "South East England": "J",
-    "South Scotland": "N",
-    "South Wales": "K",
-    "South West England": "G",
-    "Southern England": "H",
-    "Yorkshire": "Y"
-}
-
+# --- Region DataFrame ---
 region_df = pd.DataFrame({
-    "region": list(REGION_CODES.keys()),
-    "code": list(REGION_CODES.values()),
+    "region": [
+        "East Midlands", "Eastern England", "London", "Merseyside and North Wales",
+        "Midlands", "North East England", "North Scotland", "North West England",
+        "South East England", "South Scotland", "South Wales", "South West England",
+        "Southern England", "Yorkshire"
+    ],
+    "code": ["E", "F", "A", "D", "M", "C", "P", "B", "J", "N", "K", "G", "H", "Y"],
     "lat": [52.8, 52.4, 51.5, 53.4, 52.5, 54.9, 57.5, 53.8, 51.3, 55.9, 51.6, 50.8, 51.0, 53.9],
     "lon": [-1.3, 0.9, -0.1, -3.0, -1.9, -1.5, -4.0, -2.6, 0.9, -3.9, -3.6, -3.5, -1.3, -1.3],
     "price": [0.18, 0.19, 0.20, 0.17, 0.18, 0.19, 0.21, 0.18, 0.19, 0.20, 0.17, 0.16, 0.18, 0.19],
-    "carbon": [150, 140, 135, 160, 155, 145, 130, 150, 140, 125, 165, 170, 155, 145]
+    "dnoregion": [
+        "WPD East Midlands", "UKPN East", "UKPN London", "SP Manweb", "WPD West Midlands",
+        "NPG North East", "Scottish Hydro Electric Power Distribution", "Electricity North West",
+        "UKPN South East", "SP Distribution", "WPD South Wales", "WPD South West",
+        "SSE South", "NPG Yorkshire"
+    ]
 })
 
-selected_region_name = st.selectbox("Select your UK region", list(REGION_CODES.keys()))
-OCTOPUS_REGION_CODE = REGION_CODES[selected_region_name]
+selected_region = st.selectbox("Select your UK region", region_df["region"])
+selected_row = region_df[region_df["region"] == selected_region].iloc[0]
+region_code = selected_row["code"]
+dnoregion_name = selected_row["dnoregion"]
 
-# --- Configuration ---
 OCTOPUS_PRODUCT_CODE = "AGILE-18-02-21"
-PUSHBULLET_ACCESS_TOKEN = 'o.nP2rRaXiZMPewnsKtXX2V8WhfjCOp7Ec'
 
 @st.cache_data(ttl=3600)
-def fetch_and_process_octopus_prices(product_code, region_code):
+def fetch_octopus_prices(product_code, region_code):
     url = f"https://api.octopus.energy/v1/products/{product_code}/electricity-tariffs/E-1R-{product_code}-{region_code}/standard-unit-rates/"
-    params = {"page_size": 96, "order_by": "valid_from"}
     try:
-        response = requests.get(url, params=params)
+        response = requests.get(url)
         response.raise_for_status()
         data = response.json()
-
         df = pd.DataFrame(data['results'])
         df['valid_from'] = pd.to_datetime(df['valid_from'], utc=True)
         df['valid_to'] = pd.to_datetime(df['valid_to'], utc=True)
         df['price_gbp'] = df['value_inc_vat'] / 100
-        df = df.sort_values('valid_from').reset_index(drop=True)
-
-        uk_timezone = pytz.timezone('Europe/London')
-        df['valid_from_bst'] = df['valid_from'].dt.tz_convert(uk_timezone)
-        df['valid_to_bst'] = df['valid_to'].dt.tz_convert(uk_timezone)
-
+        uk_tz = pytz.timezone('Europe/London')
+        df['valid_from_bst'] = df['valid_from'].dt.tz_convert(uk_tz)
+        df['valid_to_bst'] = df['valid_to'].dt.tz_convert(uk_tz)
         return df
-
-    except requests.exceptions.RequestException as e:
-        st.error(f"Error fetching data from Octopus Energy API: {e}")
-        return pd.DataFrame()
-    except KeyError:
-        st.error("Could not parse Octopus Energy API response.")
+    except:
+        st.error("Failed to fetch Octopus Energy prices.")
         return pd.DataFrame()
 
+carbon = CarbonIntensity()
+carbon.fetch_data()
 
-
-def send_push_notification(message, access_token):
-    if not access_token:
-        st.warning("Pushbullet Access Token not set.")
-        return
-
-    data = {'type': 'note', 'title': 'Smart EV Scheduler Alert', 'body': message}
-    headers = {'Authorization': f'Bearer {access_token}'}
-
-    try:
-        response = requests.post('https://api.pushbullet.com/v2/pushes', data=data, headers=headers)
-        response.raise_for_status()
-        st.success("Notification sent successfully!")
-    except requests.exceptions.RequestException as e:
-        st.error(f"Notification failed: {e}")
-
-# --- Tabs ---
-tab1, tab2 = st.tabs(["Smart Scheduler", "UK Region Map"])
+# NEW TAB STRUCTURE
+tab1, tab2, tab3 = st.tabs([
+    "🔌 Smart Charging Advisor",
+    "🔮 Price Forecast",
+    "📊 Regional Comparison"
+])
 
 with tab1:
-    st.title("⚡ Smart EV Charging Scheduler")
-    st.markdown("Optimize your EV charging by identifying the cheapest electricity periods based on Octopus Agile prices in your region.")
+    st.title("🔌 Smart Charging Advisor")
 
-    prices_df = fetch_and_process_octopus_prices(OCTOPUS_PRODUCT_CODE, OCTOPUS_REGION_CODE)
+    df = fetch_octopus_prices(OCTOPUS_PRODUCT_CODE, region_code)
+    actual, forecast = carbon.get_intensity_by_dnoregion(dnoregion_name)
+    now = datetime.now(pytz.timezone("Europe/London"))
+    current_row = df[(df['valid_from_bst'] <= now) & (df['valid_to_bst'] > now)]
 
-    if not prices_df.empty and 'price_gbp' in prices_df.columns and not prices_df['price_gbp'].isnull().all():
-        st.header("Current Electricity Price & Outlook")
+    if not current_row.empty:
+        st.metric("Current Electricity Price", f"£{current_row.iloc[0]['price_gbp']:.4f}/kWh")
 
-        uk_timezone = pytz.timezone('Europe/London')
-        now_uk = datetime.now(uk_timezone)
+    st.markdown("Enter your EV details and see how much charging will cost now vs. the cheapest slot!")
 
-        current_slot = prices_df[(prices_df['valid_from_bst'] <= now_uk) & (prices_df['valid_to_bst'] > now_uk)]
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        battery_capacity = st.number_input("Battery Capacity (kWh)", min_value=10.0, max_value=150.0, value=60.0)
+    with col2:
+        current_soc = st.slider("Current Charge (%)", 0, 100, 20)
+    with col3:
+        target_soc = st.slider("Target Charge (%)", 1, 100, 80)
 
-        col1, col2, col3 = st.columns(3)
+    window_hours = st.slider("Charging Window (hours)", 2, 6, 4)
 
-        with col1:
-            st.metric(label="Your Region", value=f"{OCTOPUS_REGION_CODE} - {selected_region_name}")
-            st.caption(f"Octopus Agile Product: `{OCTOPUS_PRODUCT_CODE}`")
+    if not df.empty:
+        calc = PriceCalculator(df, battery_capacity, current_soc, target_soc, window_hours)
+        results = calc.calculate_savings()
 
-        if not current_slot.empty:
-            current_price = current_slot['price_gbp'].values[0]
-            avg_price = prices_df['price_gbp'].mean()
-            min_price = prices_df['price_gbp'].min()
-            max_price = prices_df['price_gbp'].max()
+        st.info(f"🔋 You need to charge: {results['kwh_needed']:.2f} kWh")
 
-            with col2:
-                st.metric(label="Current Price (Now)", value=f"£{current_price:.4f}/kWh", delta=f"£{current_price - avg_price:.4f} vs Avg")
-                st.caption(f"Current time: {now_uk.strftime('%Y-%m-%d %H:%M %Z%z')}")
+        if results["cost_now"] is not None:
+            st.metric("💰 Cost to Charge Now", f"£{results['cost_now']:.2f}", help=f"At current price: £{results['price_now']:.4f}/kWh")
+        if results["cost_cheapest"] is not None:
+            st.success(
+    f"📅 Cheapest {window_hours}-hour slot: {results['start_time'].strftime('%H:%M')} – {results['end_time'].strftime('%H:%M')}  \n"
+    f"💸 Cost: £{results['cost_cheapest']:.2f}  \n"
+    f"💡 You save: £{results['savings']:.2f}"
+)
+            st.caption(f"Cheapest slot avg price: £{results['avg_price']:.4f}/kWh")
 
-            with col3:
-                st.metric(label="Average Price (24-48h)", value=f"£{avg_price:.4f}/kWh")
-                st.caption(f"Range: £{min_price:.4f} - £{max_price:.4f}")
+        fig = px.line(df, x='valid_from_bst', y='price_gbp', title="Price Trend with Cheapest Window")
+        fig.add_trace(go.Scatter(x=df['valid_from_bst'], y=df['price_gbp'], mode='markers', marker=dict(color='blue', size=6), name='30-min Price'))
 
-            st.markdown("---")
-            st.subheader("Charging Recommendation")
+        if results["window_df"] is not None:
+            fig.add_vrect(x0=results["start_time"], x1=results["end_time"], fillcolor="green", opacity=0.2, line_width=0)
 
-            message_to_send = ""
-            if current_price < avg_price:
-                st.success("✅ It's a good time to charge your EV!")
-                message_to_send = f"⚡ Good time to charge! Current price: £{current_price:.4f}/kWh."
-            elif current_price <= (avg_price * 1.1):
-                st.info("💡 Slightly above average.")
-                message_to_send = f"💡 Slightly above average: £{current_price:.4f}/kWh."
-            else:
-                st.warning("❌ Price is high. Consider waiting.")
-                message_to_send = f"⚠️ High price: £{current_price:.4f}/kWh."
+        if results["price_now"] is not None and results["price_time"] is not None:
+            fig.add_trace(go.Scatter(
+                x=[results["price_time"]],
+                y=[results["price_now"]],
+                mode='markers+text',
+                marker=dict(color='red', size=12, symbol='star'),
+                text=["Current Price"],
+                textposition="top center",
+                name="Current Price"
+            ))
 
-            st.subheader("Upcoming Cheapest Charging Window")
-            charging_duration_hours = st.slider("Select desired charging duration (hours)", 1, 8, 4, 1)
-            charging_slots = charging_duration_hours * 2
-            future_prices_df = prices_df[prices_df['valid_from_bst'] > now_uk].copy()
-
-            if not future_prices_df.empty and len(future_prices_df) >= charging_slots:
-                future_prices_df['rolling_cost'] = future_prices_df['price_gbp'].rolling(window=charging_slots).sum()
-                cheapest_start_idx = future_prices_df['rolling_cost'].idxmin()
-                cheapest_window = future_prices_df.loc[cheapest_start_idx:cheapest_start_idx + charging_slots - 1]
-
-                if not cheapest_window.empty:
-                    cheapest_start = cheapest_window['valid_from_bst'].min()
-                    cheapest_end = cheapest_window['valid_to_bst'].max()
-                    total_cost = cheapest_window['rolling_cost'].min()
-                    avg_kwh_price = total_cost / charging_slots
-
-                    st.success(f"**Optimal {charging_duration_hours}-hour window:**")
-                    st.write(f"**Start:** {cheapest_start.strftime('%Y-%m-%d %H:%M %Z')}")
-                    st.write(f"**End:** {cheapest_end.strftime('%Y-%m-%d %H:%M %Z')}")
-                    st.write(f"**Estimated Avg Price:** £{avg_kwh_price:.4f}/kWh")
-                    message_to_send += f"\nOptimal {charging_duration_hours}h window: {cheapest_start.strftime('%H:%M')} to {cheapest_end.strftime('%H:%M')} at £{avg_kwh_price:.4f}/kWh."
-
-            st.markdown("---")
-            st.subheader("Send Notification")
-            if st.button("Send Pushbullet Notification"):
-                send_push_notification(message_to_send, PUSHBULLET_ACCESS_TOKEN)
-
-            st.header("Electricity Price Trends")
-            fig, ax = plt.subplots(figsize=(14, 7))
-            ax.plot(prices_df['valid_from_bst'], prices_df['price_gbp'], marker='o', linestyle='-', markersize=4, label='Price per kWh')
-            ax.axhline(avg_price, color='red', linestyle='--', label=f'Avg Price (£{avg_price:.4f}/kWh)')
-            ax.axvline(now_uk, color='green', linestyle=':', linewidth=2, label='Now')
-            ax.scatter(now_uk, current_price, color='black', s=100, zorder=5, label='Current Price')
-            if 'cheapest_window' in locals() and not cheapest_window.empty:
-                ax.axvspan(cheapest_start, cheapest_end, color='green', alpha=0.2, label='Cheapest Window')
-            ax.set_title(f"Octopus Agile Prices - Region {OCTOPUS_REGION_CODE}")
-            ax.set_xlabel("Time (BST)")
-            ax.set_ylabel("Price (£/kWh)")
-            ax.tick_params(axis='x', rotation=45)
-            ax.legend()
-            ax.grid(True)
-            plt.tight_layout()
-            st.pyplot(fig)
-
-        else:
-            st.error("No current price data available.")
-    else:
-        st.error("Failed to load electricity price data. Check your API or network.")
+        st.plotly_chart(fig, use_container_width=True)
 
 with tab2:
-    st.title("UK Electricity Prices & Carbon Intensity by Region")
-    fig_map = px.scatter_mapbox(
-        region_df,
-        lat="lat",
-        lon="lon",
-        hover_name="region",
-        hover_data={"price": True, "carbon": True},
-        color="price",
-        size="carbon",
-        size_max=25,
-        zoom=4,
-        mapbox_style="open-street-map",
-        title="Regional Electricity Price (£/kWh) and Carbon Intensity (gCO2/kWh)"
-    )
-    st.plotly_chart(fig_map, use_container_width=True)
+    st.title("🔮 Price Forecast")
+    df = fetch_octopus_prices(OCTOPUS_PRODUCT_CODE, region_code)
+    if not df.empty:
+        forecaster = PriceForecaster()
+        forecaster.fit(df)
+        pred_df = forecaster.predict_next_day(df)
+        st.line_chart(pred_df.set_index('valid_from_bst')['predicted_price'])
+        st.dataframe(pred_df[['valid_from_bst', 'predicted_price']].rename(columns={'valid_from_bst': 'Time', 'predicted_price': 'Forecast Price (£/kWh)'}))
+    else:
+        st.warning("No price data available for forecasting.")
+
+with tab3:
+    st.title("📊 Regional Comparison")
+    choice = st.radio("View:", ["Electricity Price", "Carbon Intensity"])
+
+    if choice == "Electricity Price":
+        fig = px.scatter_mapbox(
+            region_df, lat="lat", lon="lon", color="price", size=[10]*len(region_df),
+            hover_name="region", zoom=4, mapbox_style="open-street-map",
+            title="Electricity Price by Region (£/kWh)"
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        if carbon.cached_data:
+            regional_data = carbon.cached_data['data'][0]['regions']
+            c_df = pd.DataFrame([{
+                "dnoregion": r['dnoregion'],
+                "carbon": r['intensity'].get('forecast'),
+                "index": r['intensity'].get('index')
+            } for r in regional_data if r['intensity'].get('forecast') is not None])
+
+            c_df = c_df.merge(region_df, on="dnoregion", how="left")
+            fig = px.scatter_mapbox(
+                c_df,
+                lat="lat", lon="lon", color="carbon", size=[30]*len(c_df),
+                color_continuous_scale="Viridis",
+                hover_name="region",
+                hover_data={"carbon": True, "index": True, "lat": False, "lon": False},
+                zoom=4, mapbox_style="carto-positron",
+                title="Regional Carbon Intensity (gCO₂/kWh)"
+            )
+            fig.update_traces(marker=dict(opacity=0.85))
+            fig.update_layout(margin={"r":0,"t":40,"l":0,"b":0})
+            st.plotly_chart(fig, use_container_width=True)
 
 st.markdown("---")
 st.markdown("Built by Ramkumar Kannan for Axle Energy prototype.")
-st.markdown("[GitHub Link](https://github.com/your-github-profile/your-repo-name)")
