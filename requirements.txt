@@ -4,3 +4,5 @@ requests
 matplotlib
 pytz
 plotly
+xgboost
+scikit-learn
