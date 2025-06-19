@@ -69,6 +69,61 @@ class PriceCalculator:
         end_time = window_df.iloc[-1]['valid_to_bst']
         return cost, avg_price, start_time, end_time, window_df
 
+    def find_cheapest_window_today(self):
+        """Cheapest window for the whole day."""
+        slots_needed = int(self.window_hours * 2)
+        if len(self.df) < slots_needed:
+            return None, None, None, None, None
+
+        min_avg = None
+        min_start = None
+        for i in range(0, len(self.df) - slots_needed + 1):
+            window = self.df.iloc[i:i + slots_needed]
+            avg = window['price_gbp'].mean()
+            if (min_avg is None) or (avg < min_avg):
+                min_avg = avg
+                min_start = i
+
+        if min_start is None:
+            return None, None, None, None, None
+
+        window_df = self.df.iloc[min_start:min_start + slots_needed]
+        avg_price = window_df['price_gbp'].mean()
+        cost = self.kwh_needed * avg_price
+        start_time = window_df.iloc[0]['valid_from_bst']
+        end_time = window_df.iloc[-1]['valid_to_bst']
+        return cost, avg_price, start_time, end_time, window_df
+
+    def find_cheapest_window_from_now(self):
+        """Cheapest window starting at or after now."""
+        slots_needed = int(self.window_hours * 2)
+        if len(self.df) < slots_needed:
+            return None, None, None, None, None
+
+        # Only consider windows starting at or after now
+        now = self.now
+        valid_starts = self.df[self.df['valid_from_bst'] >= now].index
+        min_avg = None
+        min_start = None
+        for i in valid_starts:
+            if i + slots_needed > len(self.df):
+                break
+            window = self.df.iloc[i:i + slots_needed]
+            avg = window['price_gbp'].mean()
+            if (min_avg is None) or (avg < min_avg):
+                min_avg = avg
+                min_start = i
+
+        if min_start is None:
+            return None, None, None, None, None
+
+        window_df = self.df.iloc[min_start:min_start + slots_needed]
+        avg_price = window_df['price_gbp'].mean()
+        cost = self.kwh_needed * avg_price
+        start_time = window_df.iloc[0]['valid_from_bst']
+        end_time = window_df.iloc[-1]['valid_to_bst']
+        return cost, avg_price, start_time, end_time, window_df
+
     def calculate_savings(self):
         cost_now, price_now, price_time = self.cost_to_charge_now()
         cost_cheapest, avg_price, start_time, end_time, window_df = self.find_cheapest_window()
