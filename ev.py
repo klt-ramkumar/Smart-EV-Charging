@@ -366,4 +366,4 @@ with tab4:
             st.plotly_chart(fig, use_container_width=True)
 
 st.markdown("---")
-st.markdown("Built by Ramkumar Kannan for Axle Energy prototype.")
+st.markdown("Built by Ramkumar Kannan")
